@@ -5,6 +5,7 @@ const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const Order = require("./models/Order.js");
 const RecoveryCase = require("./models/RecoveryCase.js");
+const { getRecommendation } = require("./services/recommendationEngine.js");
 require("dotenv").config();
 
 
@@ -153,14 +154,19 @@ app.post("/api/payments/verify", async (req, res) => {
 // CREATE RECOVERY CASE
 // ====================
 
+// ====================
+// CREATE RECOVERY CASE
+// ====================
+
 app.post("/api/recovery-cases", async (req, res) => {
   try {
 
     const {
       amount,
-      failureReason,
-      aiRecommendation
+      failureReason
     } = req.body;
+
+    const aiRecommendation = getRecommendation(failureReason);
 
     const recoveryCase = await RecoveryCase.create({
       amount,
@@ -183,7 +189,24 @@ app.post("/api/recovery-cases", async (req, res) => {
   }
 });
 
+// ====================
+// GET RECOVERY CASES
+// ====================
 
+app.get("/api/recovery-cases", async (req, res) => {
+  try {
+    const recoveryCases = await RecoveryCase.find();
+
+    res.json(recoveryCases);
+
+  } catch (error) {
+    console.error("Failed to fetch recovery cases:", error);
+
+    res.status(500).json({
+      error: "Failed to fetch recovery cases"
+    });
+  }
+});
 // ====================
 // START SERVER
 // ====================
