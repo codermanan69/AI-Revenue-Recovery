@@ -7,30 +7,72 @@ function App() {
   const [payment, setPayment] = useState(null);
   const [recoveryCases, setRecoveryCases] = useState([]);
 
+  const [dashboardStats, setDashboardStats] = useState({
+  revenueAtRisk: 0,
+  recoveredRevenue: 0,
+  openRecoveryCases: 0,
+  recoveryRate: 0
+});
+
   // ====================
   // FETCH RECOVERY CASES
   // ====================
 
   useEffect(() => {
-    const fetchRecoveryCases = async () => {
-      try {
-        const response = await fetch(
-          "http://localhost:5000/api/recovery-cases"
-        );
+  const fetchDashboardData = async () => {
+    try {
+      const recoveryResponse = await fetch(
+        "http://localhost:5000/api/recovery-cases"
+      );
 
-        const data = await response.json();
+      const recoveryData = await recoveryResponse.json();
+      setRecoveryCases(recoveryData);
 
-        setRecoveryCases(data);
+      const statsResponse = await fetch(
+        "http://localhost:5000/api/dashboard/stats"
+      );
 
-        console.log("Recovery cases:", data);
-      } catch (error) {
-        console.error("Failed to fetch recovery cases:", error);
+      const statsData = await statsResponse.json();
+      setDashboardStats(statsData);
+    } catch (error) {
+      console.error("Failed to fetch dashboard data:", error);
+    }
+  };
+
+  fetchDashboardData();
+}, []);
+
+const updateRecoveryStatus = async (id, status) => {
+  try {
+    const response = await fetch(
+      `http://localhost:5000/api/recovery-cases/${id}/status`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          status: status
+        })
       }
-    };
+    );
 
-    fetchRecoveryCases();
-  }, []);
+    const updatedCase = await response.json();
 
+    if (!response.ok) {
+      throw new Error(updatedCase.error);
+    }
+
+    setRecoveryCases((cases) =>
+      cases.map((item) =>
+        item._id === id ? updatedCase : item
+      )
+    );
+
+  } catch (error) {
+    console.error("Failed to update recovery status:", error);
+  }
+};
   // ====================
   // CREATE RAZORPAY ORDER
   // ====================
@@ -154,25 +196,25 @@ function App() {
 
           <div className="card">
             <p>Revenue at Risk</p>
-            <h2>₹50,000</h2>
+            <h2>₹{dashboardStats.revenueAtRisk.toLocaleString("en-IN")}</h2>
             <span>From failed payments</span>
           </div>
 
           <div className="card">
             <p>Recovered Revenue</p>
-            <h2>₹32,000</h2>
+            <h2>₹{dashboardStats.recoveredRevenue.toLocaleString("en-IN")}</h2>
             <span>Successfully recovered</span>
           </div>
 
           <div className="card">
             <p>Open Recovery Cases</p>
-            <h2>8</h2>
+            <h2>{dashboardStats.openRecoveryCases}</h2>
             <span>Needs attention</span>
           </div>
 
           <div className="card">
             <p>Recovery Rate</p>
-            <h2>64%</h2>
+            <h2>{dashboardStats.recoveryRate}%</h2>
             <span>Overall recovery</span>
           </div>
 
@@ -240,20 +282,49 @@ function App() {
               </div>
 
 
-              <div>
+             <div>
 
-                <span
-                  className={
-                    recoveryCase.recoveryStatus ===
-                    "pending"
-                      ? "badge pending"
-                      : "badge"
-                  }
-                >
-                  {recoveryCase.recoveryStatus}
-                </span>
+  <span
+    className={
+      recoveryCase.recoveryStatus ===
+      "pending"
+        ? "badge pending"
+        : "badge"
+    }
+  >
+    {recoveryCase.recoveryStatus}
+  </span>
 
-              </div>
+  {recoveryCase.recoveryStatus === "pending" && (
+    <div style={{ marginTop: "10px" }}>
+
+      <button
+        onClick={() =>
+          updateRecoveryStatus(
+            recoveryCase._id,
+            "recovered"
+          )
+        }
+      >
+        Mark Recovered
+      </button>
+
+      <button
+        onClick={() =>
+          updateRecoveryStatus(
+            recoveryCase._id,
+            "failed"
+          )
+        }
+        style={{ marginLeft: "8px" }}
+      >
+        Mark Failed
+      </button>
+
+    </div>
+  )}
+
+</div>
 
             </div>
 

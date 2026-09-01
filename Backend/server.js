@@ -207,6 +207,87 @@ app.get("/api/recovery-cases", async (req, res) => {
     });
   }
 });
+
+// ====================
+// DASHBOARD STATS
+// ====================
+
+app.get("/api/dashboard/stats", async (req, res) => {
+  try {
+    const recoveryCases = await RecoveryCase.find();
+
+    const totalCases = recoveryCases.length;
+
+    const revenueAtRisk = recoveryCases
+      .filter((item) => item.recoveryStatus === "pending")
+      .reduce((total, item) => total + item.amount, 0);
+
+    const recoveredRevenue = recoveryCases
+      .filter((item) => item.recoveryStatus === "recovered")
+      .reduce((total, item) => total + item.amount, 0);
+
+    const openRecoveryCases = recoveryCases.filter(
+      (item) => item.recoveryStatus === "pending"
+    ).length;
+
+    const recoveredCases = recoveryCases.filter(
+      (item) => item.recoveryStatus === "recovered"
+    ).length;
+
+    const recoveryRate =
+      totalCases === 0
+        ? 0
+        : Math.round((recoveredCases / totalCases) * 100);
+
+    res.json({
+      revenueAtRisk,
+      recoveredRevenue,
+      openRecoveryCases,
+      recoveryRate
+    });
+
+  } catch (error) {
+    console.error("Failed to fetch dashboard stats:", error);
+
+    res.status(500).json({
+      error: "Failed to fetch dashboard stats"
+    });
+  }
+});
+
+app.patch("/api/recovery-cases/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body;
+
+    const allowedStatuses = ["pending", "recovered", "failed"];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        error: "Invalid recovery status"
+      });
+    }
+
+    const updatedCase = await RecoveryCase.findByIdAndUpdate(
+      req.params.id,
+      { recoveryStatus: status },
+      { new: true }
+    );
+
+    if (!updatedCase) {
+      return res.status(404).json({
+        error: "Recovery case not found"
+      });
+    }
+
+    res.json(updatedCase);
+  } catch (error) {
+    console.error("Failed to update recovery case:", error);
+
+    res.status(500).json({
+      error: "Failed to update recovery case"
+    });
+  }
+});
 // ====================
 // START SERVER
 // ====================
