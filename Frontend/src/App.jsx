@@ -69,6 +69,14 @@ const updateRecoveryStatus = async (id, status) => {
       )
     );
 
+    const statsResponse = await fetch(
+      "http://localhost:5000/api/dashboard/stats"
+    );
+
+    const statsData = await statsResponse.json();
+
+    setDashboardStats(statsData);
+
   } catch (error) {
     console.error("Failed to update recovery status:", error);
   }
@@ -163,6 +171,36 @@ const updateRecoveryStatus = async (id, status) => {
     }
   };
 
+  const simulateFailedPayment = async () => {
+  try {
+    const response = await fetch(
+      "http://localhost:5000/api/payments/failed",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          amount: 300000,
+          failureReason: "Insufficient funds",
+          attempts: 2
+        })
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error);
+    }
+
+    setRecoveryCases((cases) => [...cases, data]);
+
+  } catch (error) {
+    console.error("Failed payment simulation:", error);
+  }
+};
+
   // ====================
   // UI
   // ====================
@@ -242,6 +280,9 @@ const updateRecoveryStatus = async (id, status) => {
                 ? "Creating..."
                 : "Create Test Order"}
             </button>
+            <button onClick={simulateFailedPayment}>
+  Simulate Failed Payment
+</button>
 
           </div>
 

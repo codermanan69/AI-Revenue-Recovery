@@ -1,15 +1,22 @@
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const { GoogleGenAI } = require("@google/genai");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
+
 const Order = require("./models/Order.js");
 const RecoveryCase = require("./models/RecoveryCase.js");
+
 const { getRecommendation } = require("./services/recommendationEngine.js");
+
 require("dotenv").config();
 
-
 const app = express();
+
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY
+});
 
 
 // ====================
@@ -19,6 +26,61 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+
+// ====================
+// YAHAN AI FUNCTION PASTE KARNA HAI
+// ====================
+
+async function getAIRecommendation(amount, failureReason, attempts) {
+  try {
+
+    const response = await ai.models.generateContent({
+     model: "gemini-3.5-flash-lite",
+
+      contents: `
+You are an AI payment recovery decision engine.
+
+Analyze this failed payment and choose the best recovery action.
+
+Payment amount: ${amount / 100} INR
+Failure reason: ${failureReason}
+Attempts: ${attempts}
+
+You MUST return only one word:
+
+retry
+reminder
+stop
+
+Rules:
+- retry = payment may succeed if attempted again
+- reminder = customer should be reminded to complete payment
+- stop = repeated failures or very low chance of recovery
+`
+    });
+
+    const recommendation = response.text
+      .trim()
+      .toLowerCase();
+
+    if (
+      recommendation !== "retry" &&
+      recommendation !== "reminder" &&
+      recommendation !== "stop"
+    ) {
+      return "reminder";
+    }
+
+    return recommendation;
+
+  } catch (error) {
+
+    console.error("Gemini recommendation failed:", error);
+
+    // Gemini fail hone par fallback
+    return getRecommendation(failureReason);
+  }
+}
 
 // ====================
 // RAZORPAY SETUP
@@ -154,23 +216,18 @@ app.post("/api/payments/verify", async (req, res) => {
 // CREATE RECOVERY CASE
 // ====================
 
-// ====================
-// CREATE RECOVERY CASE
-// ====================
 
 app.post("/api/recovery-cases", async (req, res) => {
   try {
 
-    const {
-      amount,
-      failureReason
-    } = req.body;
+    const { amount, failureReason, attempts } = req.body;
 
     const aiRecommendation = getRecommendation(failureReason);
 
     const recoveryCase = await RecoveryCase.create({
       amount,
       failureReason,
+      attempts: attempts || 1,
       aiRecommendation
     });
 
@@ -186,6 +243,37 @@ app.post("/api/recovery-cases", async (req, res) => {
       error: "Recovery case creation failed"
     });
 
+  }
+});
+
+
+app.post("/api/payments/failed", async (req, res) => {
+  try {
+    const { amount, failureReason, attempts } = req.body;
+
+    const aiRecommendation = await getAIRecommendation(
+  amount,
+  failureReason,
+  attempts
+);
+
+    const recoveryCase = await RecoveryCase.create({
+      amount,
+      failureReason,
+      attempts: attempts || 1,
+      aiRecommendation
+    });
+
+    console.log("Failed payment recovery case:", recoveryCase);
+
+    res.json(recoveryCase);
+
+  } catch (error) {
+    console.error("Failed payment recovery case:", error);
+
+    res.status(500).json({
+      error: "Failed payment recovery case creation failed"
+    });
   }
 });
 
