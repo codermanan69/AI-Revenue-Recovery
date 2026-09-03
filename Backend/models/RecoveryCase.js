@@ -21,6 +21,9 @@ const recoveryCaseSchema = new mongoose.Schema({
     enum: ["retry", "reminder", "stop"],
     required: true
   },
+  aiReason: {
+  type: String
+},
 
   recoveryStatus: {
     type: String,

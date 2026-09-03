@@ -33,52 +33,69 @@ app.use(express.json());
 
 async function getAIRecommendation(amount, failureReason, attempts) {
   try {
-
     const response = await ai.models.generateContent({
-     model: "gemini-3.5-flash-lite",
+      model: "gemini-3.5-flash-lite",
 
       contents: `
 You are an AI payment recovery decision engine.
 
-Analyze this failed payment and choose the best recovery action.
+Analyze this failed payment and decide the best recovery action.
 
 Payment amount: ${amount / 100} INR
 Failure reason: ${failureReason}
 Attempts: ${attempts}
 
-You MUST return only one word:
-
+Choose ONLY one action:
 retry
 reminder
 stop
 
 Rules:
-- retry = payment may succeed if attempted again
-- reminder = customer should be reminded to complete payment
+- retry = payment has a reasonable chance of succeeding if attempted again
+- reminder = customer should be reminded to complete the payment
 - stop = repeated failures or very low chance of recovery
+
+Return the response EXACTLY in this format:
+
+ACTION | REASON
+
+Example:
+reminder | Customer has already attempted the payment multiple times, so a reminder is better than another immediate retry.
 `
     });
 
-    const recommendation = response.text
-      .trim()
-      .toLowerCase();
+    const result = response.text.trim();
+
+    const parts = result.split("|");
+
+    const action = parts[0]?.trim().toLowerCase();
+    const reason = parts.slice(1).join("|").trim();
 
     if (
-      recommendation !== "retry" &&
-      recommendation !== "reminder" &&
-      recommendation !== "stop"
+      action !== "retry" &&
+      action !== "reminder" &&
+      action !== "stop"
     ) {
-      return "reminder";
+      return {
+        action: "reminder",
+        reason: "Customer should be reminded to complete the payment."
+      };
     }
 
-    return recommendation;
+    return {
+      action,
+      reason: reason || "AI selected this recovery action based on the payment details."
+    };
 
   } catch (error) {
-
     console.error("Gemini recommendation failed:", error);
 
-    // Gemini fail hone par fallback
-    return getRecommendation(failureReason);
+    const fallbackAction = getRecommendation(failureReason);
+
+    return {
+      action: fallbackAction,
+      reason: "AI was unavailable, so the fallback recovery rule was used."
+    };
   }
 }
 
@@ -257,12 +274,16 @@ app.post("/api/payments/failed", async (req, res) => {
   attempts
 );
 
-    const recoveryCase = await RecoveryCase.create({
-      amount,
-      failureReason,
-      attempts: attempts || 1,
-      aiRecommendation
-    });
+const recommendationText =
+  `${aiRecommendation.action} | ${aiRecommendation.reason}`;
+
+const recoveryCase = await RecoveryCase.create({
+  amount,
+  failureReason,
+  attempts: attempts || 1,
+  aiRecommendation: aiRecommendation.action,
+  aiReason: aiRecommendation.reason
+});
 
     console.log("Failed payment recovery case:", recoveryCase);
 
@@ -373,6 +394,62 @@ app.patch("/api/recovery-cases/:id/status", async (req, res) => {
 
     res.status(500).json({
       error: "Failed to update recovery case"
+    });
+  }
+});
+
+app.post("/api/recovery-cases/:id/action", async (req, res) => {
+  try {
+    const { action } = req.body;
+
+    const allowedActions = ["retry", "reminder", "stop"];
+
+    if (!allowedActions.includes(action)) {
+      return res.status(400).json({
+        error: "Invalid recovery action"
+      });
+    }
+
+    const recoveryCase = await RecoveryCase.findById(
+      req.params.id
+    );
+
+    if (!recoveryCase) {
+      return res.status(404).json({
+        error: "Recovery case not found"
+      });
+    }
+
+    if (action === "reminder") {
+      return res.json({
+        message: "Reminder sent to the customer",
+        recoveryCase
+      });
+    }
+
+    if (action === "retry") {
+      return res.json({
+        message: "Payment retry initiated",
+        recoveryCase
+      });
+    }
+
+    if (action === "stop") {
+      recoveryCase.recoveryStatus = "failed";
+
+      await recoveryCase.save();
+
+      return res.json({
+        message: "Recovery stopped",
+        recoveryCase
+      });
+    }
+
+  } catch (error) {
+    console.error("Recovery action failed:", error);
+
+    res.status(500).json({
+      error: "Recovery action failed"
     });
   }
 });

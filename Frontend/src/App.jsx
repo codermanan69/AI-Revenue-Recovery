@@ -81,6 +81,52 @@ const updateRecoveryStatus = async (id, status) => {
     console.error("Failed to update recovery status:", error);
   }
 };
+
+const handleRecoveryAction = async (id, action) => {
+  try {
+    const response = await fetch(
+      `http://localhost:5000/api/recovery-cases/${id}/action`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: action
+        })
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error);
+    }
+
+    alert(data.message);
+
+    if (action === "stop") {
+      setRecoveryCases((cases) =>
+        cases.map((item) =>
+          item._id === id
+            ? data.recoveryCase
+            : item
+        )
+      );
+
+      const statsResponse = await fetch(
+        "http://localhost:5000/api/dashboard/stats"
+      );
+
+      const statsData = await statsResponse.json();
+
+      setDashboardStats(statsData);
+    }
+
+  } catch (error) {
+    console.error("Recovery action failed:", error);
+  }
+};
   // ====================
   // CREATE RAZORPAY ORDER
   // ====================
@@ -308,21 +354,23 @@ const updateRecoveryStatus = async (id, status) => {
                 </p>
 
               </div>
-
-
               <div>
+  <strong>
+    AI Recommendation
+  </strong>
 
-                <strong>
-                  AI Recommendation
-                </strong>
+  <p>
+    {recoveryCase.aiRecommendation}
+  </p>
 
-                <p>
-                  {recoveryCase.aiRecommendation}
-                </p>
+  <strong>
+    Why?
+  </strong>
 
-              </div>
-
-
+  <p>
+    {recoveryCase.aiReason}
+  </p>
+</div>
              <div>
 
   <span
@@ -336,34 +384,50 @@ const updateRecoveryStatus = async (id, status) => {
     {recoveryCase.recoveryStatus}
   </span>
 
-  {recoveryCase.recoveryStatus === "pending" && (
-    <div style={{ marginTop: "10px" }}>
+ {recoveryCase.recoveryStatus === "pending" && (
+  <div style={{ marginTop: "10px" }}>
 
+    {recoveryCase.aiRecommendation === "retry" && (
       <button
         onClick={() =>
-          updateRecoveryStatus(
+          handleRecoveryAction(
             recoveryCase._id,
-            "recovered"
+            "retry"
           )
         }
       >
-        Mark Recovered
+        Retry Payment
       </button>
+    )}
 
+    {recoveryCase.aiRecommendation === "reminder" && (
       <button
         onClick={() =>
-          updateRecoveryStatus(
+          handleRecoveryAction(
             recoveryCase._id,
-            "failed"
+            "reminder"
           )
         }
-        style={{ marginLeft: "8px" }}
       >
-        Mark Failed
+        Send Reminder
       </button>
+    )}
 
-    </div>
-  )}
+    {recoveryCase.aiRecommendation === "stop" && (
+      <button
+        onClick={() =>
+          handleRecoveryAction(
+            recoveryCase._id,
+            "stop"
+          )
+        }
+      >
+        Stop Recovery
+      </button>
+    )}
+
+  </div>
+)}
 
 </div>
 
