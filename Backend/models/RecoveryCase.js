@@ -37,6 +37,18 @@ const recoveryCaseSchema = new mongoose.Schema({
   actionAt: {
     type: Date
   },
+  paymentLinkId: {
+    type: String
+  },
+  paymentLinkUrl: {
+    type: String
+  },
+  recoveryMessage: {
+    type: String
+  },
+  recoveryMessageGeneratedAt: {
+    type: Date
+  },
   actionHistory: {
     type: [
       {

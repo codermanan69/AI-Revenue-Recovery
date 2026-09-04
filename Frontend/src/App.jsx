@@ -7,7 +7,8 @@ function App() {
   const [payment, setPayment] = useState(null);
   const [recoveryCases, setRecoveryCases] = useState([]);
 
-  const [actionLoading, setActionLoading] = useState(false);
+  const [loadingCaseId, setLoadingCaseId] = useState(null);
+  const [simulating, setSimulating] = useState(false);
 
   const [dashboardStats, setDashboardStats] = useState({
   revenueAtRisk: 0,
@@ -85,9 +86,9 @@ const updateRecoveryStatus = async (id, status) => {
 };
 
 const handleRecoveryAction = async (id, action) => {
-  if (actionLoading) return;
+  if (loadingCaseId) return;
   try {
-    setActionLoading(true);
+    setLoadingCaseId(id);
 
     const response = await fetch(
       `http://localhost:5000/api/recovery-cases/${id}/action`,
@@ -117,8 +118,6 @@ const handleRecoveryAction = async (id, action) => {
       );
     }
 
-    alert(data.message);
-
     // Refresh dashboard stats
     const statsResponse = await fetch(
       "http://localhost:5000/api/dashboard/stats"
@@ -131,7 +130,7 @@ const handleRecoveryAction = async (id, action) => {
   } catch (error) {
     console.error("Recovery action failed:", error);
   } finally {
-    setActionLoading(false);
+    setLoadingCaseId(null);
   }
 };
   // ====================
@@ -293,34 +292,46 @@ razorpayCheckout.open();
   };
 
   const simulateFailedPayment = async () => {
-  try {
-    const response = await fetch(
-      "http://localhost:5000/api/payments/failed",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          amount: 300000,
-          failureReason: "Insufficient funds",
-          attempts: 2
-        })
+    if (simulating) return;
+    try {
+      setSimulating(true);
+      const response = await fetch(
+        "http://localhost:5000/api/payments/failed",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            amount: 300000,
+            failureReason: "Insufficient funds",
+            attempts: 2
+          })
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Simulation failed");
       }
-    );
 
-    const data = await response.json();
+      // Add created recovery case directly to state so it renders immediately
+      setRecoveryCases((cases) => [...cases, data]);
 
-    if (!response.ok) {
-      throw new Error(data.error);
+      // Refresh dashboard stats
+      const statsResponse = await fetch(
+        "http://localhost:5000/api/dashboard/stats"
+      );
+      const statsData = await statsResponse.json();
+      setDashboardStats(statsData);
+
+    } catch (error) {
+      console.error("Failed payment simulation:", error);
+    } finally {
+      setSimulating(false);
     }
-
-    setRecoveryCases((cases) => [...cases, data]);
-
-  } catch (error) {
-    console.error("Failed payment simulation:", error);
-  }
-};
+  };
 
   // ====================
   // UI
@@ -401,139 +412,179 @@ razorpayCheckout.open();
                 ? "Creating..."
                 : "Create Test Order"}
             </button>
-            <button onClick={simulateFailedPayment}>
-  Simulate Failed Payment
-</button>
+            <button onClick={simulateFailedPayment} disabled={simulating}>
+              {simulating ? "Simulating..." : "Simulate Failed Payment"}
+            </button>
 
           </div>
 
 
           {/* MongoDB Recovery Cases */}
 
-          {recoveryCases.map((recoveryCase) => (
+          {recoveryCases.length === 0 ? (
+            <div className="empty-state">
+              <p>No active recovery cases.</p>
+            </div>
+          ) : (
+            recoveryCases.map((recoveryCase) => (
 
-            <div
-              className="case"
-              key={recoveryCase._id}
-            >
+              <div
+                className="case"
+                key={recoveryCase._id}
+              >
 
-              <div>
+                <div className="case-details">
 
-                <h3>
-                  ₹{recoveryCase.amount / 100} Payment
-                </h3>
+                  <h3>
+                    ₹{recoveryCase.amount / 100} Payment
+                  </h3>
 
-                <p>
-                  Failure reason:{" "}
-                  {recoveryCase.failureReason}
-                </p>
+                  <p>
+                    <strong>Failure reason:</strong>{" "}
+                    {recoveryCase.failureReason}
+                  </p>
+
+                </div>
+
+                <div className="case-ai-info">
+                  <div className="ai-rec-box">
+                    <strong>AI Recommendation:</strong>{" "}
+                    <span className="rec-badge">{recoveryCase.aiRecommendation}</span>
+                    <p style={{ marginTop: "6px" }}>
+                      <strong>Why?</strong> {recoveryCase.aiReason}
+                    </p>
+                  </div>
+
+                  {recoveryCase.recoveryMessage && (
+                    <div className="customer-message-box">
+                      <strong>Customer Recovery Message:</strong>
+                      <p>{recoveryCase.recoveryMessage}</p>
+                    </div>
+                  )}
+
+                  {recoveryCase.paymentLinkUrl && (
+                    <div className="payment-link-container">
+                      <a
+                        href={recoveryCase.paymentLinkUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="payment-link-anchor"
+                      >
+                        Payment Link ↗
+                      </a>
+                    </div>
+                  )}
+                </div>
+
+                <div className="case-status-actions">
+
+                  <span
+                    className={
+                      recoveryCase.recoveryStatus === "pending"
+                        ? "badge pending"
+                        : recoveryCase.recoveryStatus === "recovered"
+                        ? "badge recovered"
+                        : "badge failed"
+                    }
+                  >
+                    {recoveryCase.recoveryStatus}
+                  </span>
+
+                  {recoveryCase.recoveryStatus === "pending" && (
+                    <div style={{ marginTop: "12px" }}>
+
+                      {recoveryCase.aiRecommendation === "retry" && (
+                        <button
+                          disabled={loadingCaseId === recoveryCase._id}
+                          onClick={() =>
+                            handleRecoveryAction(
+                              recoveryCase._id,
+                              "retry"
+                            )
+                          }
+                          className="action-btn"
+                        >
+                          {loadingCaseId === recoveryCase._id ? "Processing..." : "Retry Payment"}
+                        </button>
+                      )}
+
+                      {recoveryCase.aiRecommendation === "reminder" && (
+                        <button
+                          disabled={loadingCaseId === recoveryCase._id}
+                          onClick={() =>
+                            handleRecoveryAction(
+                              recoveryCase._id,
+                              "reminder"
+                            )
+                          }
+                          className="action-btn"
+                        >
+                          {loadingCaseId === recoveryCase._id ? "Processing..." : "Send Reminder"}
+                        </button>
+                      )}
+
+                      {recoveryCase.aiRecommendation === "stop" && (
+                        <button
+                          disabled={loadingCaseId === recoveryCase._id}
+                          onClick={() =>
+                            handleRecoveryAction(
+                              recoveryCase._id,
+                              "stop"
+                            )
+                          }
+                          className="action-btn"
+                        >
+                          {loadingCaseId === recoveryCase._id ? "Processing..." : "Stop Recovery"}
+                        </button>
+                      )}
+
+                      {recoveryCase.paymentLinkUrl && (
+                        <button
+                          disabled={loadingCaseId === recoveryCase._id}
+                          onClick={() =>
+                            updateRecoveryStatus(
+                              recoveryCase._id,
+                              "recovered"
+                            )
+                          }
+                          className="action-btn"
+                          style={{ marginTop: "8px", background: "#166534", color: "#ffffff", border: "none" }}
+                        >
+                          Mark as Recovered ✓
+                        </button>
+                      )}
+
+                    </div>
+                  )}
+
+                  {(recoveryCase.actionHistory && recoveryCase.actionHistory.length > 0) && (
+                    <div className="action-history-container">
+                      <strong>Action History:</strong>
+                      <ul>
+                        {recoveryCase.actionHistory.map((item, idx) => {
+                          const actionLabels = {
+                            reminder: "Reminder sent",
+                            retry: "Payment retry initiated",
+                            stop: "Recovery stopped"
+                          };
+                          const label = actionLabels[item.action] || item.action;
+                          const timeStr = item.actionAt ? new Date(item.actionAt).toLocaleString() : "";
+                          return (
+                            <li key={item._id || idx}>
+                              {label} {timeStr && `(${timeStr})`}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
+
+                </div>
 
               </div>
-              <div>
-  <strong>
-    AI Recommendation
-  </strong>
 
-  <p>
-    {recoveryCase.aiRecommendation}
-  </p>
-
-  <strong>
-    Why?
-  </strong>
-
-  <p>
-    {recoveryCase.aiReason}
-  </p>
-</div>
-             <div>
-
-  <span
-    className={
-      recoveryCase.recoveryStatus ===
-      "pending"
-        ? "badge pending"
-        : "badge"
-    }
-  >
-    {recoveryCase.recoveryStatus}
-  </span>
-
-  {recoveryCase.recoveryStatus === "pending" && (
-   <div style={{ marginTop: "10px" }}>
-
-     {recoveryCase.aiRecommendation === "retry" && (
-       <button
-         disabled={actionLoading}
-         onClick={() =>
-           handleRecoveryAction(
-             recoveryCase._id,
-             "retry"
-           )
-         }
-       >
-         Retry Payment
-       </button>
-     )}
-
-     {recoveryCase.aiRecommendation === "reminder" && (
-       <button
-         disabled={actionLoading}
-         onClick={() =>
-           handleRecoveryAction(
-             recoveryCase._id,
-             "reminder"
-           )
-         }
-       >
-         Send Reminder
-       </button>
-     )}
-
-     {recoveryCase.aiRecommendation === "stop" && (
-       <button
-         disabled={actionLoading}
-         onClick={() =>
-           handleRecoveryAction(
-             recoveryCase._id,
-             "stop"
-           )
-         }
-       >
-         Stop Recovery
-       </button>
-     )}
-
-   </div>
- )}
-
-{(recoveryCase.actionHistory && recoveryCase.actionHistory.length > 0) && (
-  <div style={{ marginTop: "12px", borderTop: "1px dashed #ccc", paddingTop: "8px" }}>
-    <strong>Action History:</strong>
-    <ul style={{ margin: "5px 0 0 18px", padding: 0, fontSize: "0.85em" }}>
-      {recoveryCase.actionHistory.map((item, idx) => {
-        const actionLabels = {
-          reminder: "Reminder sent",
-          retry: "Payment retry initiated",
-          stop: "Recovery stopped"
-        };
-        const label = actionLabels[item.action] || item.action;
-        const timeStr = item.actionAt ? new Date(item.actionAt).toLocaleString() : "";
-        return (
-          <li key={item._id || idx}>
-            {label} {timeStr && `(${timeStr})`}
-          </li>
-        );
-      })}
-    </ul>
-  </div>
-)}
-
-</div>
-
-            </div>
-
-          ))}
+            ))
+          )}
 
         </section>
 

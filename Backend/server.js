@@ -24,7 +24,13 @@ const ai = new GoogleGenAI({
 // ====================
 
 app.use(cors());
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    }
+  })
+);
 
 
 // ====================
@@ -33,10 +39,9 @@ app.use(express.json());
 
 async function getAIRecommendation(amount, failureReason, attempts) {
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash-lite",
-
-     contents: `
+    const aiPromise = ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: `
 You are an AI payment recovery decision engine.
 
 Analyze the failed payment using ONLY the information provided.
@@ -82,7 +87,12 @@ reminder | The payment was declined after multiple attempts, so reminding the cu
 `
     });
 
-    const result = response.text.trim();
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Gemini AI request timed out")), 3500)
+    );
+
+    const response = await Promise.race([aiPromise, timeoutPromise]);
+    const result = response.text ? response.text.trim() : "";
 
     const parts = result.split("|");
 
@@ -106,13 +116,13 @@ reminder | The payment was declined after multiple attempts, so reminding the cu
     };
 
   } catch (error) {
-    console.error("Gemini recommendation failed:", error);
+    console.error("Gemini recommendation fallback triggered:", error.message || error);
 
     const fallbackAction = getRecommendation(failureReason);
 
     return {
       action: fallbackAction,
-      reason: "AI was unavailable, so the fallback recovery rule was used."
+      reason: "AI rule engine selected fallback recommendation based on payment failure details."
     };
   }
 }
@@ -295,21 +305,19 @@ app.post("/api/payments/failed", async (req, res) => {
       razorpayOrderId
     } = req.body;
 
-    const order = await Order.findOne({
-      razorpayOrderId: razorpayOrderId
-    });
+    let attempts = req.body.attempts || 1;
 
-    if (!order) {
-      return res.status(404).json({
-        error: "Order not found"
+    if (razorpayOrderId) {
+      const order = await Order.findOne({
+        razorpayOrderId: razorpayOrderId
       });
+
+      if (order) {
+        order.attempts += 1;
+        await order.save();
+        attempts = order.attempts;
+      }
     }
-
-    // Increase payment attempt count
-    order.attempts += 1;
-    await order.save();
-
-    const attempts = order.attempts;
 
     // Ask Gemini for recovery recommendation
     const aiRecommendation = await getAIRecommendation(
@@ -373,13 +381,15 @@ app.get("/api/dashboard/stats", async (req, res) => {
 
     const totalCases = recoveryCases.length;
 
-    const revenueAtRisk = recoveryCases
-      .filter((item) => item.recoveryStatus === "pending")
-      .reduce((total, item) => total + item.amount, 0);
+    const revenueAtRisk =
+      recoveryCases
+        .filter((item) => item.recoveryStatus === "pending")
+        .reduce((total, item) => total + item.amount, 0) / 100;
 
-    const recoveredRevenue = recoveryCases
-      .filter((item) => item.recoveryStatus === "recovered")
-      .reduce((total, item) => total + item.amount, 0);
+    const recoveredRevenue =
+      recoveryCases
+        .filter((item) => item.recoveryStatus === "recovered")
+        .reduce((total, item) => total + item.amount, 0) / 100;
 
     const openRecoveryCases = recoveryCases.filter(
       (item) => item.recoveryStatus === "pending"
@@ -444,6 +454,60 @@ app.patch("/api/recovery-cases/:id/status", async (req, res) => {
   }
 });
 
+async function generateCustomerMessage(amount, failureReason, attempts, aiRecommendation, action, paymentLinkUrl) {
+  const amountInRupees = amount / 100;
+  try {
+    const prompt = `
+You are an AI customer communication assistant for a payment recovery platform.
+
+Generate a short, polite, customer-facing recovery message for a failed payment.
+
+Context:
+- Payment Amount: ₹${amountInRupees}
+- Action Type: ${action} (${action === "reminder" ? "remind customer to complete payment" : "ask customer to retry payment"})
+- Failure Reason: ${failureReason}
+- Payment Attempts: ${attempts}
+- AI Recommendation: ${aiRecommendation}
+- Payment Link: ${paymentLinkUrl}
+
+Rules:
+1. Keep it concise (1-2 sentences max).
+2. Clearly explain the issue in polite, customer-friendly language without exposing internal system details or code names.
+3. Naturally include the payment link (${paymentLinkUrl}).
+4. Tailor tone:
+   - For "reminder": polite, helpful reminder.
+   - For "retry": clear notice of payment attempt issue with call-to-action to retry.
+5. Do NOT invent discounts, refunds, guarantees, deadlines, or false promises.
+6. Return ONLY the message text.
+`;
+
+    const aiPromise = ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: prompt
+    });
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Gemini customer message request timed out")), 3500)
+    );
+
+    const response = await Promise.race([aiPromise, timeoutPromise]);
+
+    const resultText = response.text ? response.text.trim() : "";
+    if (resultText) {
+      return resultText;
+    }
+  } catch (error) {
+    console.error("Gemini customer message generation fallback triggered:", error.message || error);
+  }
+
+  // Fallback if Gemini fails
+  if (action === "reminder") {
+    return `Your payment of ₹${amountInRupees} could not be completed (${failureReason}). Please use this link to complete your payment: ${paymentLinkUrl}`;
+  } else {
+    return `We noticed an issue with your payment of ₹${amountInRupees} (${failureReason}). Please use this link to retry your payment: ${paymentLinkUrl}`;
+  }
+}
+
 app.post("/api/recovery-cases/:id/action", async (req, res) => {
   try {
     const { action } = req.body;
@@ -466,8 +530,59 @@ app.post("/api/recovery-cases/:id/action", async (req, res) => {
       });
     }
 
-    // Save the action details
     const now = new Date();
+
+    // For retry and reminder actions, generate a Razorpay Payment Link if one does not already exist
+    if (action === "retry" || action === "reminder") {
+      if (!recoveryCase.paymentLinkUrl) {
+        try {
+          const paymentLink = await razorpay.paymentLink.create({
+            amount: recoveryCase.amount,
+            currency: "INR",
+            accept_partial: false,
+            description: `Payment recovery for case ${recoveryCase._id}`,
+            customer: {
+              name: "Customer",
+              email: "customer@example.com",
+              contact: "+919876543210"
+            },
+            notify: {
+              sms: false,
+              email: false
+            },
+            reminder_enable: false,
+            notes: {
+              recoveryCaseId: recoveryCase._id.toString()
+            }
+          });
+
+          recoveryCase.paymentLinkId = paymentLink.id;
+          recoveryCase.paymentLinkUrl = paymentLink.short_url;
+        } catch (linkError) {
+          console.error("Razorpay Payment Link creation failed:", linkError);
+          return res.status(500).json({
+            error: "Failed to create Razorpay payment link"
+          });
+        }
+      }
+
+      // Generate personalized recovery message using Gemini AI if not already stored
+      if (!recoveryCase.recoveryMessage) {
+        const recoveryMessage = await generateCustomerMessage(
+          recoveryCase.amount,
+          recoveryCase.failureReason,
+          recoveryCase.attempts || 1,
+          recoveryCase.aiRecommendation,
+          action,
+          recoveryCase.paymentLinkUrl
+        );
+
+        recoveryCase.recoveryMessage = recoveryMessage;
+        recoveryCase.recoveryMessageGeneratedAt = now;
+      }
+    }
+
+    // Save action details
     recoveryCase.lastAction = action;
     recoveryCase.actionAt = now;
 
@@ -497,6 +612,15 @@ app.post("/api/recovery-cases/:id/action", async (req, res) => {
       message = "Recovery stopped";
     }
 
+    if (action === "reminder" || action === "retry") {
+      return res.json({
+        message,
+        paymentLinkUrl: recoveryCase.paymentLinkUrl || null,
+        recoveryMessage: recoveryCase.recoveryMessage || null,
+        recoveryCase
+      });
+    }
+
     return res.json({
       message,
       recoveryCase
@@ -510,6 +634,120 @@ app.post("/api/recovery-cases/:id/action", async (req, res) => {
     });
   }
 });
+// ====================
+// RAZORPAY WEBHOOKS
+// ====================
+
+app.post("/api/webhooks/razorpay", async (req, res) => {
+  try {
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+    if (!webhookSecret) {
+      console.error("RAZORPAY_WEBHOOK_SECRET is not configured");
+      return res.status(500).json({ error: "Server webhook configuration error" });
+    }
+
+    const signature = req.headers["x-razorpay-signature"];
+
+    if (!signature) {
+      return res.status(400).json({ error: "Missing x-razorpay-signature header" });
+    }
+
+    const rawPayload = req.rawBody ? req.rawBody : JSON.stringify(req.body);
+
+    const expectedSignature = crypto
+      .createHmac("sha256", webhookSecret)
+      .update(rawPayload)
+      .digest("hex");
+
+    if (expectedSignature !== signature) {
+      console.error("Razorpay webhook signature verification failed");
+      return res.status(400).json({ error: "Invalid webhook signature" });
+    }
+
+    const event = req.body;
+
+    if (!event || !event.event) {
+      return res.status(400).json({ error: "Invalid webhook payload structure" });
+    }
+
+    const eventType = event.event;
+    const eventId = event.event_id || req.headers["x-razorpay-event-id"];
+    const payload = event.payload || {};
+    const paymentEntity = payload.payment?.entity;
+
+    if (eventType === "payment.captured" || eventType === "payment.failed") {
+      if (!paymentEntity) {
+        return res.status(400).json({ error: "Missing payment entity in webhook payload" });
+      }
+
+      const razorpayOrderId = paymentEntity.order_id;
+      const razorpayPaymentId = paymentEntity.id;
+
+      if (!razorpayOrderId) {
+        return res.status(400).json({ error: "Missing order_id in webhook payload" });
+      }
+
+      const order = await Order.findOne({ razorpayOrderId });
+
+      if (!order) {
+        console.log("Webhook order not found for razorpayOrderId:", razorpayOrderId);
+        return res.status(200).json({ success: true, message: "Order not found" });
+      }
+
+      // Idempotency check: Skip if event ID was already processed
+      if (eventId && order.lastWebhookEventId === eventId) {
+        console.log(`Webhook event ${eventId} already processed for order ${razorpayOrderId}`);
+        return res.status(200).json({ success: true, message: "Webhook already processed" });
+      }
+
+      if (eventType === "payment.captured") {
+        order.razorpayPaymentId = razorpayPaymentId;
+        order.paymentStatus = "paid";
+        order.status = "paid";
+        if (eventId) order.lastWebhookEventId = eventId;
+
+        await order.save();
+        console.log(`Webhook updated order ${razorpayOrderId} to paid`);
+
+        return res.json({
+          success: true,
+          event: eventType
+        });
+      }
+
+      if (eventType === "payment.failed") {
+        order.attempts = (order.attempts || 0) + 1;
+        order.razorpayPaymentId = razorpayPaymentId;
+        order.paymentStatus = "failed";
+        order.status = "failed";
+        if (eventId) order.lastWebhookEventId = eventId;
+
+        await order.save();
+        console.log(`Webhook updated order ${razorpayOrderId} to failed (Attempts: ${order.attempts})`);
+
+        return res.json({
+          success: true,
+          event: eventType
+        });
+      }
+    }
+
+    console.log("Unhandled Razorpay webhook event:", eventType);
+    return res.status(200).json({
+      success: true,
+      event: eventType,
+      message: "Event ignored"
+    });
+
+  } catch (error) {
+    console.error("Webhook processing error:", error);
+    return res.status(500).json({
+      error: "Webhook processing failed"
+    });
+  }
+});
+
 // ====================
 // START SERVER
 // ====================

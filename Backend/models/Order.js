@@ -33,7 +33,10 @@ const orderSchema = new mongoose.Schema({
   attempts: {
   type: Number,
   default: 0
-}
+},
+  lastWebhookEventId: {
+    type: String
+  }
 
 });
 
