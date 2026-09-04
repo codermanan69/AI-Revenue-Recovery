@@ -36,31 +36,49 @@ async function getAIRecommendation(amount, failureReason, attempts) {
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash-lite",
 
-      contents: `
+     contents: `
 You are an AI payment recovery decision engine.
 
-Analyze this failed payment and decide the best recovery action.
+Analyze the failed payment using ONLY the information provided.
 
 Payment amount: ${amount / 100} INR
 Failure reason: ${failureReason}
 Attempts: ${attempts}
 
-Choose ONLY one action:
+Choose EXACTLY ONE action:
 retry
 reminder
 stop
 
-Rules:
-- retry = payment has a reasonable chance of succeeding if attempted again
-- reminder = customer should be reminded to complete the payment
-- stop = repeated failures or very low chance of recovery
+Follow these business rules in this priority order:
+
+1. If attempts >= 5 OR the failure reason indicates repeated failures:
+   action = stop
+
+2. If the failure reason contains "declined" AND attempts >= 2:
+   action = reminder
+
+3. If the failure reason indicates a temporary bank/server issue AND attempts <= 1:
+   action = retry
+
+4. If the customer has insufficient funds:
+   action = reminder
+
+5. If none of the above rules clearly apply:
+   action = reminder
+
+IMPORTANT:
+- Do NOT invent facts that are not present in the input.
+- Do NOT assume temporary bank issues unless the failure reason says so.
+- Do NOT change the action based only on the payment amount.
+- Follow the business rules exactly.
 
 Return the response EXACTLY in this format:
 
 ACTION | REASON
 
 Example:
-reminder | Customer has already attempted the payment multiple times, so a reminder is better than another immediate retry.
+reminder | The payment was declined after multiple attempts, so reminding the customer is better than immediately retrying.
 `
     });
 
@@ -264,40 +282,68 @@ app.post("/api/recovery-cases", async (req, res) => {
 });
 
 
+
+// ====================
+// HANDLE FAILED PAYMENT
+// ====================
+
 app.post("/api/payments/failed", async (req, res) => {
   try {
-    const { amount, failureReason, attempts } = req.body;
+    const {
+      amount,
+      failureReason,
+      razorpayOrderId
+    } = req.body;
 
+    const order = await Order.findOne({
+      razorpayOrderId: razorpayOrderId
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        error: "Order not found"
+      });
+    }
+
+    // Increase payment attempt count
+    order.attempts += 1;
+    await order.save();
+
+    const attempts = order.attempts;
+
+    // Ask Gemini for recovery recommendation
     const aiRecommendation = await getAIRecommendation(
-  amount,
-  failureReason,
-  attempts
-);
+      amount,
+      failureReason,
+      attempts
+    );
 
-const recommendationText =
-  `${aiRecommendation.action} | ${aiRecommendation.reason}`;
+    const recoveryCase = await RecoveryCase.create({
+      amount,
+      failureReason,
+      attempts: attempts,
+      aiRecommendation: aiRecommendation.action,
+      aiReason: aiRecommendation.reason
+    });
 
-const recoveryCase = await RecoveryCase.create({
-  amount,
-  failureReason,
-  attempts: attempts || 1,
-  aiRecommendation: aiRecommendation.action,
-  aiReason: aiRecommendation.reason
-});
-
-    console.log("Failed payment recovery case:", recoveryCase);
+    console.log(
+      "Failed payment recovery case:",
+      recoveryCase
+    );
 
     res.json(recoveryCase);
 
   } catch (error) {
-    console.error("Failed payment recovery case:", error);
+    console.error(
+      "Failed payment recovery case:",
+      error
+    );
 
     res.status(500).json({
       error: "Failed payment recovery case creation failed"
     });
   }
 });
-
 // ====================
 // GET RECOVERY CASES
 // ====================
@@ -420,30 +466,41 @@ app.post("/api/recovery-cases/:id/action", async (req, res) => {
       });
     }
 
-    if (action === "reminder") {
-      return res.json({
-        message: "Reminder sent to the customer",
-        recoveryCase
-      });
+    // Save the action details
+    const now = new Date();
+    recoveryCase.lastAction = action;
+    recoveryCase.actionAt = now;
+
+    // Ensure actionHistory exists safely for legacy documents
+    if (!Array.isArray(recoveryCase.actionHistory)) {
+      recoveryCase.actionHistory = [];
     }
 
-    if (action === "retry") {
-      return res.json({
-        message: "Payment retry initiated",
-        recoveryCase
-      });
-    }
+    // Append to history
+    recoveryCase.actionHistory.push({
+      action: action,
+      actionAt: now
+    });
 
     if (action === "stop") {
       recoveryCase.recoveryStatus = "failed";
-
-      await recoveryCase.save();
-
-      return res.json({
-        message: "Recovery stopped",
-        recoveryCase
-      });
     }
+
+    await recoveryCase.save();
+
+    let message = "";
+    if (action === "reminder") {
+      message = "Reminder sent to the customer";
+    } else if (action === "retry") {
+      message = "Payment retry initiated";
+    } else if (action === "stop") {
+      message = "Recovery stopped";
+    }
+
+    return res.json({
+      message,
+      recoveryCase
+    });
 
   } catch (error) {
     console.error("Recovery action failed:", error);

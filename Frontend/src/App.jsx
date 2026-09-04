@@ -7,6 +7,8 @@ function App() {
   const [payment, setPayment] = useState(null);
   const [recoveryCases, setRecoveryCases] = useState([]);
 
+  const [actionLoading, setActionLoading] = useState(false);
+
   const [dashboardStats, setDashboardStats] = useState({
   revenueAtRisk: 0,
   recoveredRevenue: 0,
@@ -83,7 +85,10 @@ const updateRecoveryStatus = async (id, status) => {
 };
 
 const handleRecoveryAction = async (id, action) => {
+  if (actionLoading) return;
   try {
+    setActionLoading(true);
+
     const response = await fetch(
       `http://localhost:5000/api/recovery-cases/${id}/action`,
       {
@@ -103,28 +108,30 @@ const handleRecoveryAction = async (id, action) => {
       throw new Error(data.error);
     }
 
-    alert(data.message);
-
-    if (action === "stop") {
+    // Update state in-place for the specific case
+    if (data.recoveryCase) {
       setRecoveryCases((cases) =>
         cases.map((item) =>
-          item._id === id
-            ? data.recoveryCase
-            : item
+          item._id === id ? data.recoveryCase : item
         )
       );
-
-      const statsResponse = await fetch(
-        "http://localhost:5000/api/dashboard/stats"
-      );
-
-      const statsData = await statsResponse.json();
-
-      setDashboardStats(statsData);
     }
+
+    alert(data.message);
+
+    // Refresh dashboard stats
+    const statsResponse = await fetch(
+      "http://localhost:5000/api/dashboard/stats"
+    );
+
+    const statsData = await statsResponse.json();
+
+    setDashboardStats(statsData);
 
   } catch (error) {
     console.error("Recovery action failed:", error);
+  } finally {
+    setActionLoading(false);
   }
 };
   // ====================
@@ -203,9 +210,77 @@ const handleRecoveryAction = async (id, action) => {
       };
 
       const razorpayCheckout =
-        new window.Razorpay(options);
+  new window.Razorpay(options);
 
-      razorpayCheckout.open();
+let isFailureHandled = false;
+
+// Payment failed event
+razorpayCheckout.on("payment.failed", async function (response) {
+  if (isFailureHandled) return;
+  isFailureHandled = true;
+
+  console.log("Payment failed:", response);
+
+const failureReason =
+  response.error.reason === "payment_failed"
+    ? response.error.description || "Payment failed"
+    : response.error.reason || response.error.description || "Payment failed";  
+
+  try {
+    const failureResponse = await fetch(
+      "http://localhost:5000/api/payments/failed",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+  amount: data.amount,
+  failureReason: failureReason,
+  razorpayOrderId: data.id
+})
+      }
+    );
+
+    const failureData = await failureResponse.json();
+
+    if (!failureResponse.ok) {
+      throw new Error(failureData.error);
+    }
+
+    console.log(
+      "AI recovery case created:",
+      failureData
+    );
+
+    // Dashboard mein new recovery case dikhao
+    setRecoveryCases((cases) => [
+      ...cases,
+      failureData
+    ]);
+
+    // Dashboard stats refresh
+    const statsResponse = await fetch(
+      "http://localhost:5000/api/dashboard/stats"
+    );
+
+    const statsData = await statsResponse.json();
+
+    setDashboardStats(statsData);
+
+    alert(
+      `Payment failed. AI recommendation: ${failureData.aiRecommendation}`
+    );
+
+  } catch (error) {
+    console.error(
+      "Failed to create recovery case:",
+      error
+    );
+  }
+});
+
+razorpayCheckout.open();
 
     } catch (error) {
       console.error(
@@ -384,48 +459,73 @@ const handleRecoveryAction = async (id, action) => {
     {recoveryCase.recoveryStatus}
   </span>
 
- {recoveryCase.recoveryStatus === "pending" && (
-  <div style={{ marginTop: "10px" }}>
+  {recoveryCase.recoveryStatus === "pending" && (
+   <div style={{ marginTop: "10px" }}>
 
-    {recoveryCase.aiRecommendation === "retry" && (
-      <button
-        onClick={() =>
-          handleRecoveryAction(
-            recoveryCase._id,
-            "retry"
-          )
-        }
-      >
-        Retry Payment
-      </button>
-    )}
+     {recoveryCase.aiRecommendation === "retry" && (
+       <button
+         disabled={actionLoading}
+         onClick={() =>
+           handleRecoveryAction(
+             recoveryCase._id,
+             "retry"
+           )
+         }
+       >
+         Retry Payment
+       </button>
+     )}
 
-    {recoveryCase.aiRecommendation === "reminder" && (
-      <button
-        onClick={() =>
-          handleRecoveryAction(
-            recoveryCase._id,
-            "reminder"
-          )
-        }
-      >
-        Send Reminder
-      </button>
-    )}
+     {recoveryCase.aiRecommendation === "reminder" && (
+       <button
+         disabled={actionLoading}
+         onClick={() =>
+           handleRecoveryAction(
+             recoveryCase._id,
+             "reminder"
+           )
+         }
+       >
+         Send Reminder
+       </button>
+     )}
 
-    {recoveryCase.aiRecommendation === "stop" && (
-      <button
-        onClick={() =>
-          handleRecoveryAction(
-            recoveryCase._id,
-            "stop"
-          )
-        }
-      >
-        Stop Recovery
-      </button>
-    )}
+     {recoveryCase.aiRecommendation === "stop" && (
+       <button
+         disabled={actionLoading}
+         onClick={() =>
+           handleRecoveryAction(
+             recoveryCase._id,
+             "stop"
+           )
+         }
+       >
+         Stop Recovery
+       </button>
+     )}
 
+   </div>
+ )}
+
+{(recoveryCase.actionHistory && recoveryCase.actionHistory.length > 0) && (
+  <div style={{ marginTop: "12px", borderTop: "1px dashed #ccc", paddingTop: "8px" }}>
+    <strong>Action History:</strong>
+    <ul style={{ margin: "5px 0 0 18px", padding: 0, fontSize: "0.85em" }}>
+      {recoveryCase.actionHistory.map((item, idx) => {
+        const actionLabels = {
+          reminder: "Reminder sent",
+          retry: "Payment retry initiated",
+          stop: "Recovery stopped"
+        };
+        const label = actionLabels[item.action] || item.action;
+        const timeStr = item.actionAt ? new Date(item.actionAt).toLocaleString() : "";
+        return (
+          <li key={item._id || idx}>
+            {label} {timeStr && `(${timeStr})`}
+          </li>
+        );
+      })}
+    </ul>
   </div>
 )}
 

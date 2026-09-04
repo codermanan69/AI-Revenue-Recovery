@@ -29,7 +29,11 @@ const orderSchema = new mongoose.Schema({
   paymentStatus: {
     type: String,
     default: "pending"
-  }
+  },
+  attempts: {
+  type: Number,
+  default: 0
+}
 
 });
 

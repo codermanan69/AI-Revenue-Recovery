@@ -29,6 +29,29 @@ const recoveryCaseSchema = new mongoose.Schema({
     type: String,
     enum: ["pending", "recovered", "failed"],
     default: "pending"
+  },
+  lastAction: {
+    type: String,
+    enum: ["retry", "reminder", "stop"]
+  },
+  actionAt: {
+    type: Date
+  },
+  actionHistory: {
+    type: [
+      {
+        action: {
+          type: String,
+          enum: ["retry", "reminder", "stop"],
+          required: true
+        },
+        actionAt: {
+          type: Date,
+          default: Date.now
+        }
+      }
+    ],
+    default: []
   }
 
 });
